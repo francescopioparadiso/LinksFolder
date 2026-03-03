@@ -144,16 +144,17 @@ function updateFolder(data: LinksData, folderId: string | null, updater: (items:
   traverse(data.items);
 }
 
-function openUrl(url: string, app?: SavedApp): void {
+function openUrl(url: string, app?: SavedApp, background = false): void {
   const escapedUrl = JSON.stringify(url);
+  const bgFlag = background && process.platform === "darwin" ? "-g " : "";
   if (app && process.platform === "darwin") {
     const targetApp = app.bundleId ? `-b ${JSON.stringify(app.bundleId)}` : `-a ${JSON.stringify(app.path)}`;
-    execSync(`open ${targetApp} ${escapedUrl}`);
+    execSync(`open ${bgFlag}${targetApp} ${escapedUrl}`);
     return;
   }
 
   if (process.platform === "darwin") {
-    execSync(`open ${escapedUrl}`);
+    execSync(`open ${bgFlag}${escapedUrl}`);
   } else if (process.platform === "win32") {
     execSync(`start "" ${escapedUrl}`, { shell: "cmd.exe" });
   } else {
@@ -178,7 +179,7 @@ function openAllLinks(folder: FolderItem): void {
   }
   for (const link of links) {
     try {
-      openUrl(link.url, link.app);
+      openUrl(link.url, link.app, true);
     } catch (e) {
       console.error(`Failed to open ${link.url}:`, e);
     }
@@ -670,6 +671,18 @@ function FolderList({ folderId, breadcrumbs = ["Links Folder"] }: { folderId: st
                       <Action.OpenInBrowser title="Open Link" url={item.url} />
                     )}
                     <Action.OpenWith path={item.url} shortcut={{ modifiers: ["cmd"], key: "o" }} />
+                    <Action
+                      title="Open Link (Keep Window Open)"
+                      icon={Icon.ArrowRight}
+                      shortcut={{ modifiers: ["opt"], key: "enter" }}
+                      onAction={async () => {
+                        try {
+                          openUrl(item.url, item.app, true);
+                        } catch (e) {
+                          await showToast(Toast.Style.Failure, "Failed to open link");
+                        }
+                      }}
+                    />
                   </>
                 ) : (
                   <Action.Push
@@ -682,7 +695,7 @@ function FolderList({ folderId, breadcrumbs = ["Links Folder"] }: { folderId: st
                   <Action
                     title="Open All Links in Folder"
                     icon={Icon.Globe}
-                    shortcut={{ modifiers: ["cmd"], key: "enter" }}
+                    shortcut={{ modifiers: ["cmd", "shift"], key: "enter" }}
                     onAction={() => openAllLinks(item)}
                   />
                 )}
