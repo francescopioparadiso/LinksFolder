@@ -26,6 +26,7 @@ type LinkItem = { id: string; type: "link"; title: string; url: string; icon?: s
 type FolderItem = { id: string; type: "folder"; title: string; icon?: string; items: AnyItem[] };
 type AnyItem = LinkItem | FolderItem;
 type LinksData = { items: AnyItem[] };
+type FolderDestination = { id: string | null; title: string; depth: number };
 
 // --- Helpers ---
 function generateId() {
@@ -142,6 +143,91 @@ function updateFolder(data: LinksData, folderId: string | null, updater: (items:
     return false;
   }
   traverse(data.items);
+}
+
+function getFolderDestinations(data: LinksData, excludedFolderId?: string): FolderDestination[] {
+  const destinations: FolderDestination[] = [{ id: null, title: "Top Level", depth: 0 }];
+
+  function traverse(items: AnyItem[], depth: number) {
+    for (const item of items) {
+      if (item.type !== "folder") continue;
+      if (item.id === excludedFolderId) continue;
+
+      destinations.push({ id: item.id, title: item.title, depth });
+      traverse(item.items || [], depth + 1);
+    }
+  }
+
+  traverse(data.items, 1);
+  return destinations;
+}
+
+function folderContainsFolder(folder: FolderItem, folderId: string): boolean {
+  for (const item of folder.items || []) {
+    if (item.type !== "folder") continue;
+    if (item.id === folderId || folderContainsFolder(item, folderId)) return true;
+  }
+  return false;
+}
+
+function moveFolder(data: LinksData, folderId: string, destinationFolderId: string | null): boolean {
+  let folderToMove: FolderItem | null = null;
+
+  function removeFolder(items: AnyItem[]): AnyItem[] {
+    const nextItems: AnyItem[] = [];
+
+    for (const item of items) {
+      if (item.type === "folder" && item.id === folderId) {
+        folderToMove = item;
+        continue;
+      }
+
+      if (item.type === "folder") {
+        nextItems.push({ ...item, items: removeFolder(item.items || []) });
+      } else {
+        nextItems.push(item);
+      }
+    }
+
+    return nextItems;
+  }
+
+  function addFolder(items: AnyItem[], movedFolder: FolderItem): boolean {
+    for (const item of items) {
+      if (item.type !== "folder") continue;
+      if (item.id === destinationFolderId) {
+        item.items = [...(item.items || []), movedFolder];
+        return true;
+      }
+      if (addFolder(item.items || [], movedFolder)) return true;
+    }
+    return false;
+  }
+
+  function findFolder(items: AnyItem[], targetFolderId: string): FolderItem | null {
+    for (const item of items) {
+      if (item.type !== "folder") continue;
+      if (item.id === targetFolderId) return item;
+      const nested = findFolder(item.items || [], targetFolderId);
+      if (nested) return nested;
+    }
+    return null;
+  }
+
+  const sourceFolder = findFolder(data.items, folderId);
+  if (!sourceFolder) return false;
+  if (destinationFolderId === folderId) return false;
+  if (destinationFolderId && folderContainsFolder(sourceFolder, destinationFolderId)) return false;
+
+  data.items = removeFolder(data.items);
+  if (!folderToMove) return false;
+
+  if (!destinationFolderId) {
+    data.items = [...data.items, folderToMove];
+    return true;
+  }
+
+  return addFolder(data.items, folderToMove);
 }
 
 function openUrl(url: string, app?: SavedApp, background = false): void {
@@ -507,6 +593,53 @@ function EditFolderForm({
   );
 }
 
+function MoveFolderForm({ folder, onComplete }: { folder: FolderItem; onComplete: () => void }) {
+  const { pop } = useNavigation();
+  const data = loadLinks();
+  const destinations = getFolderDestinations(data, folder.id);
+
+  async function handleSubmit(values: { destinationFolderId: string }) {
+    const destinationFolderId = values.destinationFolderId === "__root__" ? null : values.destinationFolderId;
+    const nextData = loadLinks();
+    const didMove = moveFolder(nextData, folder.id, destinationFolderId);
+
+    if (!didMove) {
+      await showToast({
+        style: Toast.Style.Failure,
+        title: "Could not move folder",
+        message: "Choose a different destination folder.",
+      });
+      return;
+    }
+
+    saveLinks(nextData);
+    onComplete();
+    await showToast(Toast.Style.Success, "Folder moved");
+    pop();
+  }
+
+  return (
+    <Form
+      actions={
+        <ActionPanel>
+          <Action.SubmitForm title="Move Folder" onSubmit={handleSubmit} />
+        </ActionPanel>
+      }
+    >
+      <Form.Dropdown id="destinationFolderId" title="Destination">
+        {destinations.map((destination) => (
+          <Form.Dropdown.Item
+            key={destination.id || "__root__"}
+            value={destination.id || "__root__"}
+            title={`${"  ".repeat(destination.depth)}${destination.title}`}
+            icon={destination.id ? Icon.Folder : Icon.House}
+          />
+        ))}
+      </Form.Dropdown>
+    </Form>
+  );
+}
+
 // --- Main List Component ---
 function FolderList({ folderId, breadcrumbs = ["Links Folder"] }: { folderId: string | null; breadcrumbs?: string[] }) {
   const [data, setData] = useState<LinksData | null>(null);
@@ -685,11 +818,19 @@ function FolderList({ folderId, breadcrumbs = ["Links Folder"] }: { folderId: st
                     />
                   </>
                 ) : (
-                  <Action.Push
-                    title="Open Folder"
-                    icon={item.icon || Icon.Folder}
-                    target={<FolderList folderId={item.id} breadcrumbs={[...breadcrumbs, item.title]} />}
-                  />
+                  <>
+                    <Action.Push
+                      title="Open Folder"
+                      icon={item.icon || Icon.Folder}
+                      target={<FolderList folderId={item.id} breadcrumbs={[...breadcrumbs, item.title]} />}
+                    />
+                    <Action.Push
+                      title="Move Folder to Folder"
+                      icon={Icon.Folder}
+                      shortcut={{ modifiers: ["cmd", "shift"], key: "m" }}
+                      target={<MoveFolderForm folder={item} onComplete={triggerRefresh} />}
+                    />
+                  </>
                 )}
                 {item.type === "folder" && (
                   <Action
