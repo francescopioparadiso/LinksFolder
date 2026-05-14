@@ -811,7 +811,7 @@ function FolderList({ folderId, breadcrumbs = ["Links Folder"] }: { folderId: st
                       onAction={async () => {
                         try {
                           openUrl(item.url, item.app, true);
-                        } catch (e) {
+                        } catch {
                           await showToast(Toast.Style.Failure, "Failed to open link");
                         }
                       }}
