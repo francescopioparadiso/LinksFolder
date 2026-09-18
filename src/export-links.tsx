@@ -15,6 +15,7 @@ import {
 import * as fs from "fs";
 import * as path from "path";
 import * as os from "os";
+import { fileURLToPath } from "url";
 
 function getPreferencePath(): string | undefined {
   try {
@@ -49,35 +50,87 @@ function getFormattedDateString() {
   return `${year}-${month}-${day}T${hours}.${minutes}.${seconds}`;
 }
 
+type Location = { path: string; title: string };
+
+function isDirectory(target: string): boolean {
+  try {
+    return fs.statSync(target).isDirectory();
+  } catch {
+    return false;
+  }
+}
+
+function displayPath(dir: string): string {
+  const home = os.homedir();
+  return dir.startsWith(home + path.sep) ? `~${dir.slice(home.length)}` : dir;
+}
+
+// Accepts what people actually paste: ~/Documents, "/quoted/path", file:///Users/me/Folder/, trailing slashes
+function resolveTypedPath(input: string): string {
+  let value = input.trim().replace(/^["']|["']$/g, "");
+  if (value.startsWith("file://")) {
+    try {
+      value = fileURLToPath(value);
+    } catch {
+      // keep the raw text, the folder check below reports it
+    }
+  }
+  if (value === "~" || value.startsWith("~/")) value = path.join(os.homedir(), value.slice(1));
+  return path.resolve(value);
+}
+
+// The native folder dialog of Form.FilePicker makes Raycast hide its window, so the extension never receives the
+// chosen folder. Locations are picked from a dropdown, or typed/pasted into a text field, instead.
+function getLocations(remembered?: string): Location[] {
+  const home = os.homedir();
+  const standard: Location[] = [
+    { path: path.join(home, "Downloads"), title: "Downloads" },
+    { path: path.join(home, "Desktop"), title: "Desktop" },
+    { path: path.join(home, "Documents"), title: "Documents" },
+    ...(process.platform === "darwin"
+      ? [{ path: path.join(home, "Library", "Mobile Documents", "com~apple~CloudDocs"), title: "iCloud Drive" }]
+      : []),
+    { path: home, title: "Home" },
+  ].filter((location) => isDirectory(location.path));
+
+  if (!remembered) return standard;
+
+  // The last used folder goes first so it is preselected, without duplicating a standard location
+  const known = standard.find((location) => location.path === remembered);
+  return [known ?? { path: remembered, title: displayPath(remembered) }, ...standard.filter((l) => l !== known)];
+}
+
 export default function ExportCommand() {
-  const [lastFolder, setLastFolder] = useState<string[]>([]);
+  const [locations, setLocations] = useState<Location[]>([]);
+  const [selected, setSelected] = useState("");
+  const [customPath, setCustomPath] = useState("");
+  const [customPathError, setCustomPathError] = useState<string | undefined>();
   const [isLoading, setIsLoading] = useState(true);
 
-  // Load the last used folder from LocalStorage on mount
+  // Load the last used folder from LocalStorage on mount and preselect it
   useEffect(() => {
     (async () => {
+      let remembered: string | undefined;
       try {
         const stored = await LocalStorage.getItem<string>("lastExportFolder");
-        if (stored && fs.existsSync(stored)) {
-          setLastFolder([stored]);
-        } else {
-          // Fallback to Downloads if no preference is saved or if the saved folder was deleted
-          setLastFolder([path.join(os.homedir(), "Downloads")]);
-        }
+        if (stored && isDirectory(stored)) remembered = stored;
       } catch {
-        // Variable "error" removed to fix no-unused-vars rule
-        setLastFolder([path.join(os.homedir(), "Downloads")]);
-      } finally {
-        setIsLoading(false);
+        // fall back to the default locations
       }
+      const list = getLocations(remembered);
+      setLocations(list);
+      setSelected(list[0]?.path ?? os.homedir());
+      setIsLoading(false);
     })();
   }, []);
 
-  async function handleSubmit(values: { destination: string[] }) {
-    const destFolder = values.destination[0];
+  async function handleSubmit() {
+    const typed = customPath.trim();
+    const destFolder = typed ? resolveTypedPath(typed) : selected;
 
-    if (!destFolder) {
-      await showToast({ style: Toast.Style.Failure, title: "Please select a folder" });
+    if (!destFolder || !isDirectory(destFolder)) {
+      setCustomPathError("This folder doesn't exist");
+      await showToast({ style: Toast.Style.Failure, title: "Folder not found", message: destFolder });
       return;
     }
 
@@ -137,14 +190,23 @@ export default function ExportCommand() {
     >
       <Form.Description text="Choose a destination to export your links.json file. Raycast will remember this location for your next export." />
 
-      <Form.FilePicker
-        id="destination"
-        title="Save Location"
-        allowMultipleSelection={false}
-        canChooseDirectories={true}
-        canChooseFiles={false}
-        value={lastFolder}
-        onChange={setLastFolder}
+      <Form.Dropdown id="destination" title="Save Location" value={selected} onChange={setSelected}>
+        {locations.map((location) => (
+          <Form.Dropdown.Item key={location.path} value={location.path} title={location.title} icon={Icon.Folder} />
+        ))}
+      </Form.Dropdown>
+
+      <Form.TextField
+        id="customPath"
+        title="Other Folder"
+        placeholder="Optional: paste a folder path"
+        info="Overrides Save Location. In Finder, select a folder and press ⌥⌘C to copy its path, then paste it here. ~ works too."
+        value={customPath}
+        onChange={(value) => {
+          setCustomPath(value);
+          setCustomPathError(undefined);
+        }}
+        error={customPathError}
       />
     </Form>
   );

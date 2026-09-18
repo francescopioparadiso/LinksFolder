@@ -1,3 +1,9 @@
 # Links Folder Changelog
 
-## [Initial Version] - {PR_MERGE_DATE}
+## [Search, Emoji Picker and Export Update] - {PR_MERGE_DATE}
+
+- Search now matches text anywhere in a title (for example `2` finds `y2-s2`), ranks the best matches first and selects the top result automatically.
+- Add an emoji picker inside the extension (⌘⇧E) for link and folder icons, replacing the system emoji picker that closed Raycast.
+- Export Links: choose the save location from a dropdown or paste a folder path, replacing the file picker that closed Raycast. The last used folder is remembered.
+
+## [Initial Version] - 2026-07-28
