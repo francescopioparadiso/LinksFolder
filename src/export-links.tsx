@@ -1,4 +1,4 @@
-import { useState, useEffect } from "react";
+import { useState, useEffect, useRef } from "react";
 import {
   ActionPanel,
   Action,
@@ -16,6 +16,8 @@ import * as fs from "fs";
 import * as path from "path";
 import * as os from "os";
 import { fileURLToPath } from "url";
+import { rankByQuery } from "./search";
+import { searchFolders } from "./folder-search";
 
 function getPreferencePath(): string | undefined {
   try {
@@ -50,7 +52,7 @@ function getFormattedDateString() {
   return `${year}-${month}-${day}T${hours}.${minutes}.${seconds}`;
 }
 
-type Location = { path: string; title: string };
+type Location = { path: string; name: string; detail?: string };
 
 function isDirectory(target: string): boolean {
   try {
@@ -63,6 +65,15 @@ function isDirectory(target: string): boolean {
 function displayPath(dir: string): string {
   const home = os.homedir();
   return dir.startsWith(home + path.sep) ? `~${dir.slice(home.length)}` : dir;
+}
+
+// A folder shown with its parent, so two folders with the same name can be told apart
+function toLocation(folder: string): Location {
+  return { path: folder, name: path.basename(folder) || folder, detail: displayPath(path.dirname(folder)) };
+}
+
+function locationTitle(location: Location): string {
+  return location.detail ? `${location.name} — ${location.detail}` : location.name;
 }
 
 // Accepts what people actually paste: ~/Documents, "/quoted/path", file:///Users/me/Folder/, trailing slashes
@@ -80,32 +91,36 @@ function resolveTypedPath(input: string): string {
 }
 
 // The native folder dialog of Form.FilePicker makes Raycast hide its window, so the extension never receives the
-// chosen folder. Locations are picked from a dropdown, or typed/pasted into a text field, instead.
+// chosen folder. Locations are picked from a searchable dropdown, or typed/pasted into a text field, instead.
 function getLocations(remembered?: string): Location[] {
   const home = os.homedir();
   const standard: Location[] = [
-    { path: path.join(home, "Downloads"), title: "Downloads" },
-    { path: path.join(home, "Desktop"), title: "Desktop" },
-    { path: path.join(home, "Documents"), title: "Documents" },
+    { path: path.join(home, "Downloads"), name: "Downloads" },
+    { path: path.join(home, "Desktop"), name: "Desktop" },
+    { path: path.join(home, "Documents"), name: "Documents" },
     ...(process.platform === "darwin"
-      ? [{ path: path.join(home, "Library", "Mobile Documents", "com~apple~CloudDocs"), title: "iCloud Drive" }]
+      ? [{ path: path.join(home, "Library", "Mobile Documents", "com~apple~CloudDocs"), name: "iCloud Drive" }]
       : []),
-    { path: home, title: "Home" },
+    { path: home, name: "Home" },
   ].filter((location) => isDirectory(location.path));
 
   if (!remembered) return standard;
 
   // The last used folder goes first so it is preselected, without duplicating a standard location
   const known = standard.find((location) => location.path === remembered);
-  return [known ?? { path: remembered, title: displayPath(remembered) }, ...standard.filter((l) => l !== known)];
+  return [known ?? toLocation(remembered), ...standard.filter((location) => location !== known)];
 }
 
 export default function ExportCommand() {
   const [locations, setLocations] = useState<Location[]>([]);
-  const [selected, setSelected] = useState("");
+  const [selected, setSelected] = useState<Location | null>(null);
+  const [searchText, setSearchText] = useState("");
+  const [searchResults, setSearchResults] = useState<Location[]>([]);
+  const [isSearching, setIsSearching] = useState(false);
   const [customPath, setCustomPath] = useState("");
   const [customPathError, setCustomPathError] = useState<string | undefined>();
   const [isLoading, setIsLoading] = useState(true);
+  const latestSearch = useRef(0);
 
   // Load the last used folder from LocalStorage on mount and preselect it
   useEffect(() => {
@@ -119,14 +134,37 @@ export default function ExportCommand() {
       }
       const list = getLocations(remembered);
       setLocations(list);
-      setSelected(list[0]?.path ?? os.homedir());
+      setSelected(list[0] ?? toLocation(os.homedir()));
       setIsLoading(false);
     })();
   }, []);
 
+  // Typing in the dropdown searches every folder under the home directory, including iCloud Drive
+  function handleSearchTextChange(text: string) {
+    setSearchText(text);
+    const searchId = ++latestSearch.current;
+
+    if (!text.trim()) {
+      setSearchResults([]);
+      setIsSearching(false);
+      return;
+    }
+
+    setIsSearching(true);
+    searchFolders(text)
+      .then((folders) => {
+        if (searchId !== latestSearch.current) return; // a newer search replaced this one
+        setSearchResults(folders.map(toLocation));
+        setIsSearching(false);
+      })
+      .catch(() => {
+        if (searchId === latestSearch.current) setIsSearching(false);
+      });
+  }
+
   async function handleSubmit() {
     const typed = customPath.trim();
-    const destFolder = typed ? resolveTypedPath(typed) : selected;
+    const destFolder = typed ? resolveTypedPath(typed) : selected?.path;
 
     if (!destFolder || !isDirectory(destFolder)) {
       setCustomPathError("This folder doesn't exist");
@@ -176,9 +214,19 @@ export default function ExportCommand() {
     }
   }
 
-  if (isLoading) {
+  if (isLoading || !selected) {
     return <Form isLoading={true} />;
   }
+
+  // Folders shown in the dropdown: the defaults when idle, ranked matches while searching
+  const query = searchText.trim();
+  const candidates = [
+    ...locations,
+    ...searchResults.filter((result) => !locations.some((location) => location.path === result.path)),
+  ];
+  const matches = query ? rankByQuery(candidates, query, (location) => ({ primary: location.name })) : locations;
+  // The selected folder always stays in the list, otherwise the dropdown loses its value while searching
+  const items = matches.some((location) => location.path === selected.path) ? matches : [selected, ...matches];
 
   return (
     <Form
@@ -188,11 +236,29 @@ export default function ExportCommand() {
         </ActionPanel>
       }
     >
-      <Form.Description text="Choose a destination to export your links.json file. Raycast will remember this location for your next export." />
+      <Form.Description text="Choose a destination to export your links.json file. Type in Save Location to search all your folders, including iCloud Drive. Raycast will remember this location for your next export." />
 
-      <Form.Dropdown id="destination" title="Save Location" value={selected} onChange={setSelected}>
-        {locations.map((location) => (
-          <Form.Dropdown.Item key={location.path} value={location.path} title={location.title} icon={Icon.Folder} />
+      <Form.Dropdown
+        id="destination"
+        title="Save Location"
+        placeholder="Search all folders…"
+        value={selected.path}
+        onChange={(value) => {
+          const chosen = candidates.find((location) => location.path === value);
+          if (chosen) setSelected(chosen);
+        }}
+        filtering={false}
+        throttle
+        isLoading={isSearching}
+        onSearchTextChange={handleSearchTextChange}
+      >
+        {items.map((location) => (
+          <Form.Dropdown.Item
+            key={location.path}
+            value={location.path}
+            title={locationTitle(location)}
+            icon={Icon.Folder}
+          />
         ))}
       </Form.Dropdown>
 
